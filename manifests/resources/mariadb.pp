@@ -32,7 +32,7 @@ define uhosting::resources::mariadb (
       validate_string($sitedata['db_password'])
       $db_password = $sitedata['db_password']
     } else {
-      $db_password = fqdn_rand(30)
+      $db_password = fqdn_rand_string(42, '', "password_${name}")
     }
     if $sitedata['db_user'] {
       $db_user = $sitedata['db_user']
