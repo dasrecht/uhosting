@@ -24,19 +24,8 @@
 # [*ssl*]
 # [*vassals_dir*]
 # [*vhost_defaults*]
-# [*webroot*]
 #
 # === app_settings
-#
-# [*manage_package*]
-#   Default: false
-#   Defines if the owncloud-server package should be installed from the official
-#   ownCloud repository.
-#
-# [*package_version*]
-#   Default: empty
-#   If manage_package is true this can be used to chose which package version to install.
-#   It also pins this application version in APT.
 #
 # [*max_upload_size*]
 #   Default: 1024m
@@ -46,6 +35,7 @@
 # === Authors
 #
 # Tobias Brunner <tobias.brunner@vshn.ch>
+# Bastian Widmer <bastian@amazee.io>
 #
 # === Copyright
 #
@@ -57,7 +47,6 @@ define uhosting::app::owncloud (
   $vassals_dir,
   $vhost_defaults,
   $webroot,
-  $repo_url = 'https://download.owncloud.org/download/repositories/8.2/xUbuntu_',
 ) {
 
   #############################################################################
@@ -68,12 +57,6 @@ define uhosting::app::owncloud (
   validate_bool($ssl)
   validate_hash($vhost_defaults)
   validate_absolute_path($webroot)
-
-  if $app_settings['manage_package'] {
-    $_webroot = '/var/www/owncloud/'
-  } else {
-    $_webroot = $webroot
-  }
 
   if $app_settings['max_upload_size'] {
     $_max_upload_size = $app_settings['max_upload_size']
@@ -90,10 +73,10 @@ define uhosting::app::owncloud (
   $plugins = 'php'
   $vassal_params = {
     'static-skip-ext' => '.php',
-    'check-static'    => $_webroot,
-    'chdir'           => $_webroot,
-    'cron'            => "-3 -1 -1 -1 -1 /usr/bin/php -f ${_webroot}cron.php 1>/dev/null",
-    'php-docroot'     => $_webroot,
+    'check-static'    => $webroot,
+    'chdir'           => $webroot,
+    'cron'            => "-3 -1 -1 -1 -1 /usr/bin/php -f ${webroot}cron.php 1>/dev/null",
+    'php-docroot'     => $webroot,
     'php-allowed-ext' => '.php',
     'php-index'       => 'index.php',
     'php-set'         => [
@@ -120,7 +103,7 @@ define uhosting::app::owncloud (
 
   $_app_vhost_params = {
     use_default_location => false,
-    www_root => $_webroot,
+    www_root => $webroot,
     rewrite_rules => [
       '^/caldav(.*)$ /remote.php/caldav$1 redirect',
       '^/carddav(.*)$ /remote.php/carddav$1 redirect',
@@ -138,7 +121,7 @@ define uhosting::app::owncloud (
     ssl           => $ssl,
     ssl_only      => $ssl,
     location      => '/',
-    www_root      => $_webroot,
+    www_root      => $webroot,
     rewrite_rules => [
       '^/.well-known/host-meta /public.php?service=host-meta last',
       '^/.well-known/host-meta.json /public.php?service=host-meta-json last',
@@ -172,56 +155,40 @@ define uhosting::app::owncloud (
   #############################################################################
 
   ## Pre-requisits
+  ensure_packages([ 'php-curl',
+                    'php-intl',
+                    'php-xmlrpc',
+                    'php-apcu',
+                    'php-gd'])
 
-  ensure_packages([ 'php5-curl',
-                    'php5-intl',
-                    'php5-xmlrpc',
-                    'php5-xsl',
-                    'php5-apcu',
-                    'php5-gd'])
-
-  ## If needed install application package
-
-  if $app_settings['manage_package'] {
-    if $app_settings['package_version'] {
-      $_package_version = $app_settings['package_version']
-      ::apt::pin { 'hold-owncloud-server':
-        packages => 'owncloud-server',
-        version  => $app_settings['package_version'],
-        priority => 1001,
-      }
-    } else {
-      $_package_version = undef
-    }
-    Exec['apt_update'] -> Package['owncloud-server']
-    ::apt::source { 'owncloud':
-      comment  => 'Official repository for ownCloud',
-      location => "${repo_url}${::lsbdistrelease}/",
-      release  => ' ',
-      repos    => '/',
-      key      => {
-        id => 'BCECA90325B072AB1245F739AB7C32C35180350A',
-        source => 'https://download.owncloud.org/download/repositories/stable/Ubuntu_14.04/Release.key',
-      },
-      include  => {
-        src => false,
-        deb => true,
-      },
-    } ->
-    package { 'owncloud-server':
-      ensure => $_package_version,
-    } ~>
-    # see https://doc.owncloud.org/server/8.0/admin_manual/installation/installation_wizard.html#strong-perms-label
-    exec { 'oc_set_owner':
-      path        => '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-      command     => "chown -R root:www-data $_webroot; chown -R ${name}:www-data $_webroot/data $_webroot/config $_webroot/apps $_webroot/themes;",
-      refreshonly => true, # run only when package is installed or upgraded
-    } ~>
-    exec { 'oc_set_mode':
-      path        => '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-      command     => "find $_webroot/ -type f -print0 | xargs -0 chmod 0640; find $_webroot/ -type d -print0 | xargs -0 chmod 0750",
-      refreshonly => true, # run only when package is installed or upgraded
-    }
+  ## Checkout Owncloud Application to webroot
+  vcsrepo { $webroot:
+    ensure     => present,
+    provider   => git,
+    source     => 'https://github.com/owncloud/core.git',
+    revision   => $app_settings['version'],
+    submodules => true,
+    require    => File[$webroot],
+    notify     => [
+      Exec['oc_set_owner'],
+      Exec['oc_set_mode'],
+    ]
+  }->
+  # Create Data Dir
+  file { "${webroot}/data/":
+    ensure => directory,
+    mode   => '0644',
+    owner  => $name,
+  }->
+  # see https://doc.owncloud.org/server/8.0/admin_manual/installation/installation_wizard.html#strong-perms-label
+  exec { 'oc_set_owner':
+    path        => '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    command     => "chown -R root:www-data $webroot; chown -R ${name}:www-data $webroot/data $webroot/config $webroot/apps $webroot/themes;",
+    refreshonly => true,
+  } ~>
+  exec { 'oc_set_mode':
+    path        => '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    command     => "find $webroot/ -type f -print0 | xargs -0 chmod 0640; find $webroot/ -type d -print0 | xargs -0 chmod 0750",
+    refreshonly => true,
   }
-
 }
